@@ -1,0 +1,28 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { StateApp } from '../src/App';
+import { RpStateMachine } from '../src/runtime';
+import { emptyState, seedContainer } from '../src/persistence';
+const fake = () => ({ chat: [], chatId: 'chat', chatMetadata: {}, extensionSettings: {}, saveMetadata: vi.fn().mockResolvedValue(undefined), generateRaw: vi.fn(), eventSource: { on: vi.fn() }, eventTypes: {} });
+describe('drawer', () => {
+  it('requires date and location seed confirmation', () => { const context = fake(); const runtime = new RpStateMachine(() => context); render(<StateApp runtime={runtime} getContext={() => context} />); fireEvent.click(screen.getByText('State')); expect(screen.getByText('Seed this chat')).toBeInTheDocument(); expect(screen.getByText('Save baseline')).toBeInTheDocument(); });
+  it('synchronizes open editors when canonical state changes', async () => {
+    const context = fake(); const state = emptyState('2026-01-01T00:00', 'Inn'); state.inventory.rope = { id: 'rope', name: 'Rope', quantity: 1 };
+    context.chatMetadata = { rp_state_machine: seedContainer(state, 'prefix', 0) };
+    const runtime = new RpStateMachine(() => context); const view = render(<StateApp runtime={runtime} getContext={() => context} />); fireEvent.click(screen.getByText('State'));
+    expect(screen.getByLabelText('Location')).toHaveValue('Inn');
+    (context.chatMetadata as any).rp_state_machine.currentState.world.location = 'Docks';
+    view.rerender(<StateApp runtime={runtime} getContext={() => context} />);
+    await waitFor(() => expect(screen.getByLabelText('Location')).toHaveValue('Docks'));
+    fireEvent.click(screen.getByText('Inventory'));
+    expect(screen.getByLabelText('Rope quantity')).toHaveValue(1);
+    (context.chatMetadata as any).rp_state_machine.currentState.inventory.rope.quantity = 4;
+    view.rerender(<StateApp runtime={runtime} getContext={() => context} />);
+    await waitFor(() => expect(screen.getByLabelText('Rope quantity')).toHaveValue(4));
+  });
+  it('shows rejected raw output and the latest relationship reason', () => {
+    const context = fake(); const state = emptyState('2026-01-01T00:00', 'Inn'); state.characters.mira = { id: 'mira', displayName: 'Mira', aliases: [], conditions: [], relationship: { score: 1, lastReason: 'Shared a secret' } };
+    const container = seedContainer(state, 'prefix', 0); container.reviewQueue.push({ id: 'review', kind: 'extraction', message: 'Malformed', raw: '{bad json', createdAt: new Date().toISOString() }); context.chatMetadata = { rp_state_machine: container };
+    const runtime = new RpStateMachine(() => context); render(<StateApp runtime={runtime} getContext={() => context} />); fireEvent.click(screen.getByText('State')); fireEvent.click(screen.getByText('Characters')); expect(screen.getByText(/Shared a secret/)).toBeInTheDocument(); fireEvent.click(screen.getByText('History & Review')); expect(screen.getByText('{bad json')).toBeInTheDocument();
+  });
+});
