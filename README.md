@@ -82,7 +82,8 @@ mutate its input.
 
 ## Development
 
-`npm test` runs Vitest/React Testing Library checks for reducer atomicity and
+`npm run format:check` verifies Prettier formatting and `npm run lint` runs
+ESLint's recommended JavaScript/TypeScript and React Hooks checks. `npm test` runs Vitest/React Testing Library checks for reducer atomicity and
 every event type, extraction fallback/diagnostics, replay after edits, swipes,
 and deletions, manual ordering, chat-switch races, persistence isolation,
 prompt truncation, and drawer synchronization. `npm run typecheck` and
