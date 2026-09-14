@@ -117,10 +117,14 @@ export interface Preferences {
   injectionEnabled: boolean;
   tokenCeiling: number;
   debug: boolean;
+  stateAgentProfileId: string | null;
+  stateAgentMaxTokens: number;
 }
 export const DEFAULT_PREFERENCES: Preferences = {
   paused: false,
   injectionEnabled: true,
   tokenCeiling: 1500,
   debug: false,
+  stateAgentProfileId: null,
+  stateAgentMaxTokens: 512,
 };

@@ -59,6 +59,50 @@ describe('runtime reconciliation', () => {
     expect(result.transactions).toHaveLength(1);
     expect(context.generateRaw).toHaveBeenCalledTimes(1);
   });
+  it('uses the configured state profile without narrator fallback', async () => {
+    const { context } = fixture();
+    const sendRequest = vi.fn().mockResolvedValue({
+      content:
+        '{"events":[{"type":"location.set","location":"Profile Docks"}],"explanation":"Arrival"}',
+    });
+    (context as any).ConnectionManagerRequestService = {
+      getSupportedProfiles: () => [{ id: 'state', name: 'State' }],
+      sendRequest,
+    };
+    context.extensionSettings = {
+      rp_state_machine: {
+        stateAgentProfileId: 'state',
+        stateAgentMaxTokens: 700,
+      },
+    };
+    const machine = new RpStateMachine(() => context);
+    await machine.seed(emptyState('2026-01-01T00:00', 'Inn'));
+    context.chat.push({ is_user: false, name: 'Mira', mes: 'We arrive.' });
+    await machine.retry();
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    expect(context.generateRaw).not.toHaveBeenCalled();
+    expect(getContainer(context)!.currentState.world.location).toBe(
+      'Profile Docks',
+    );
+  });
+  it('reviews missing configured profiles instead of falling back to narrator', async () => {
+    const { context } = fixture();
+    (context as any).ConnectionManagerRequestService = {
+      getSupportedProfiles: () => [],
+      sendRequest: vi.fn(),
+    };
+    context.extensionSettings = {
+      rp_state_machine: { stateAgentProfileId: 'missing' },
+    };
+    const machine = new RpStateMachine(() => context);
+    await machine.seed(emptyState('2026-01-01T00:00', 'Inn'));
+    context.chat.push({ is_user: false, name: 'Mira', mes: 'We arrive.' });
+    await machine.retry();
+    expect(context.generateRaw).not.toHaveBeenCalled();
+    expect(getContainer(context)!.reviewQueue[0].message).toMatch(
+      /unavailable/,
+    );
+  });
   it('marks a pre-seed edit as needing reseed', async () => {
     const { context, handlers } = fixture();
     const machine = new RpStateMachine(() => context);

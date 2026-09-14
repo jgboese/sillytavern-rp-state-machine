@@ -1,9 +1,9 @@
 # RP State Machine
 
 A self-contained SillyTavern 1.18.0 UI extension that maintains an auditable,
-per-chat canonical roleplay state. It uses only the active SillyTavern
-connection and `chatMetadata`; there is no server plugin, database,
-localStorage canonical data, or separate credential.
+per-chat canonical roleplay state. It stores canonical data only in
+`chatMetadata`; there is no server plugin, database, localStorage canonical
+data, or separate credential.
 
 ## Install
 
@@ -35,8 +35,20 @@ generation interceptor.
 
 Open **State** in the toolbar (or `/rpstate`). Confirm an initial local
 Gregorian date/time and location; this creates an explicit baseline. The
-extension will then, after normal generation ends, invisibly ask the active
-connection to emit a constrained JSON event list. Zod and the deterministic
+extension will then, after normal generation ends, invisibly ask a state agent
+to emit a constrained JSON event list. By default this is the active narrator
+connection, preserving existing behavior. In **Settings → State extraction
+model**, choose a Connection Manager profile to use a different provider,
+model, preset, or credential for extraction while narration stays on the
+active SillyTavern connection. Choose a fast, literal profile with low
+creativity and reasoning disabled.
+
+If a selected state profile is deleted, disabled, or unavailable, extraction
+fails safely into **History & Review**; it never silently falls back to the
+narrator. Connection Manager owns profile credentials, and this extension does
+not store or log them. Test cross-provider authentication before relying on a
+profile in play—SillyTavern 1.18 integrations can expose provider-specific
+`secret-id` configuration issues. Zod and the deterministic
 reducer validate the whole transaction before state can change. Invalid output
 is kept in **History & Review** and cannot mutate state.
 
@@ -76,9 +88,12 @@ mutate its input.
    compare the rebuilt state with a fresh replay from the seed.
 5. Repeat in a group chat with duplicate display names and one member without a
    `characterId`; only unique aliases or stable IDs should resolve.
-6. Switch chats while an extraction is running; confirm neither chat receives
-   the other's transaction. Disable the extension and confirm its injection and
-   event listeners are removed.
+6. Try Chat Completion, Text Completion, same-provider, and cross-provider
+   narrator/state-profile combinations. Delete the chosen profile and disable
+   Connection Manager; verify actionable review items and no narrator fallback.
+7. Switch chats while an extraction is running; confirm neither chat receives
+   the other's transaction. Disable the extension and confirm its injection,
+   requests, and event listeners are removed.
 
 ## Development
 

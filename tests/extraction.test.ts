@@ -6,6 +6,8 @@ import {
   validateExtraction,
 } from '../src/extraction';
 import { emptyState } from '../src/persistence';
+const agentFrom = (generate: ReturnType<typeof vi.fn>) => ({ generate });
+const options = { maxTokens: 512 };
 describe('extraction protocol', () => {
   it('includes group speaker identity without relying on characterId', () =>
     expect(
@@ -30,31 +32,37 @@ describe('extraction protocol', () => {
     expect(() => parseExtraction('no json')).toThrow();
   });
   it('uses JSON-only fallback once', async () => {
-    const generateRaw = vi
+    const generate = vi
       .fn()
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce('{"events":[],"explanation":"none"}');
     const result = await extract(
-      { generateRaw },
+      agentFrom(generate),
       emptyState('2026-01-01T00:00', 'Inn'),
       { assistant: 'Nothing happens.' },
+      options,
     );
     expect(result.events).toEqual([]);
-    expect(generateRaw).toHaveBeenCalledTimes(2);
+    expect(generate).toHaveBeenCalledTimes(2);
   });
   it('accepts fenced JSON and sends SillyTavern jsonSchema wrapper', async () => {
-    const generateRaw = vi
+    const generate = vi
       .fn()
       .mockResolvedValue('```json\n{"events":[],"explanation":"none"}\n```');
-    await extract({ generateRaw }, emptyState('2026-01-01T00:00', 'Inn'), {
-      assistant: 'Nothing.',
-    });
-    expect(generateRaw.mock.calls[0][0].jsonSchema).toMatchObject({
+    await extract(
+      agentFrom(generate),
+      emptyState('2026-01-01T00:00', 'Inn'),
+      {
+        assistant: 'Nothing.',
+      },
+      options,
+    );
+    expect(generate.mock.calls[0][0].jsonSchema).toMatchObject({
       name: 'rp_state_events',
       strict: true,
       value: { additionalProperties: false },
     });
-    expect(generateRaw.mock.calls[0][0].responseLength).toBe(512);
+    expect(generate.mock.calls[0][0].maxTokens).toBe(512);
   });
   it('keeps unknown references out of committed state', () => {
     const result = parseExtraction(
@@ -71,13 +79,32 @@ describe('extraction protocol', () => {
       ),
     ).toThrow(/manual/i));
   it('reports unsupported structured output when fallback also fails', async () => {
-    const generateRaw = vi.fn().mockResolvedValue('not json');
+    const generate = vi.fn().mockResolvedValue('not json');
     await expect(
-      extract({ generateRaw }, emptyState('2026-01-01T00:00', 'Inn'), {
-        assistant: 'x',
-      }),
+      extract(
+        agentFrom(generate),
+        emptyState('2026-01-01T00:00', 'Inn'),
+        {
+          assistant: 'x',
+        },
+        options,
+      ),
     ).rejects.toThrow(/fallback failed/);
-    expect(generateRaw).toHaveBeenCalledTimes(2);
-    expect(generateRaw.mock.calls[1][0].responseLength).toBe(512);
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate.mock.calls[1][0].maxTokens).toBe(512);
+  });
+  it('does not retry a provider rejection', async () => {
+    const generate = vi
+      .fn()
+      .mockRejectedValue(new Error('authentication failed'));
+    await expect(
+      extract(
+        agentFrom(generate),
+        emptyState('2026-01-01T00:00', 'Inn'),
+        { assistant: 'x' },
+        options,
+      ),
+    ).rejects.toThrow('authentication failed');
+    expect(generate).toHaveBeenCalledTimes(1);
   });
 });

@@ -19,6 +19,9 @@ import type {
   StateTransaction,
 } from './types';
 import { containerSchema, gameStateSchema } from './schema';
+import type { ConnectionManagerRequestService } from './state-agent';
+import { createStateAgent } from './state-agent';
+import { normalizeStateAgentMaxTokens } from './persistence';
 
 export interface TavernContext {
   chat: TavernMessage[];
@@ -28,6 +31,7 @@ export interface TavernContext {
   saveMetadata(): Promise<void>;
   saveSettingsDebounced?: () => void;
   generateRaw(options: Record<string, unknown>): Promise<unknown>;
+  ConnectionManagerRequestService?: ConnectionManagerRequestService;
   getTokenCountAsync?: (text: string) => Promise<number>;
   setExtensionPrompt?: (...args: unknown[]) => void;
   eventSource: {
@@ -76,6 +80,7 @@ export class RpStateMachine {
   private disposed = false;
   private revision = 0;
   private reconcileTimer?: ReturnType<typeof setTimeout>;
+  private abortController?: AbortController;
   constructor(
     private readonly getContext: GetContext,
     private readonly onChange: () => void = () => {},
@@ -121,6 +126,7 @@ export class RpStateMachine {
   stop() {
     this.disposed = true;
     this.revision++;
+    this.abortController?.abort();
     if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
     this.unsubs.splice(0).forEach((fn) => fn());
     try {
@@ -135,12 +141,16 @@ export class RpStateMachine {
       return;
     }
     if (event === 'CHAT_CHANGED') {
+      this.revision++;
+      this.abortController?.abort();
       this.changed = true;
       this.scheduleReconcile();
       this.onChange();
       return;
     }
     if (messageEvents.includes(event)) {
+      this.revision++;
+      this.abortController?.abort();
       this.changed = true;
       this.scheduleReconcile();
       this.onChange();
@@ -220,196 +230,212 @@ export class RpStateMachine {
       console.debug('[RP State Machine] reconcile start', chatId);
     if (!container || prefs.paused || !this.changed) return;
     this.changed = false;
-    const messages = await fingerprintMessages(ctx.chat);
-    const currentPrefix = await chatPrefixFingerprint(
-      messages,
-      container.seed.messageCount,
-    );
-    if (
-      this.disposed ||
-      !sameChat(this.getContext(), chatId) ||
-      revision !== this.revision
-    )
-      return;
-    if (currentPrefix !== container.seed.chatPrefixFingerprint) {
-      container.status = 'needs-reseed';
-      review(container, {
-        kind: 'replay',
-        message: 'A message before the seed changed; reseed is required.',
-      });
-      putContainer(ctx, container);
-      await ctx.saveMetadata();
-      this.onChange();
-      return;
-    }
-    const old = container.messages;
-    const start = this.firstChanged(
-      old,
-      messages,
-      container.seed.messageCount,
-      container.transactions,
-    );
-    if (start === -1) return;
-    container.status = 'replaying';
-    const anchoredManual = container.transactions.filter(
-      (t) => t.origin === 'manual',
-    );
-    const seedAnchor = this.seedAnchor(container);
-    const retained = container.transactions.filter(
-      (t) =>
-        t.sourceFingerprint === seedAnchor ||
-        (t.sourceOrdinal !== undefined && t.sourceOrdinal < start),
-    );
-    const retainedState = retained.reduce((state, transaction) => {
-      try {
-        return applyTransaction(state, transaction.events);
-      } catch (error) {
+    const agent = createStateAgent(ctx, prefs.stateAgentProfileId);
+    const maxTokens = normalizeStateAgentMaxTokens(prefs.stateAgentMaxTokens);
+    const abortController = new AbortController();
+    this.abortController = abortController;
+    try {
+      const messages = await fingerprintMessages(ctx.chat);
+      const currentPrefix = await chatPrefixFingerprint(
+        messages,
+        container.seed.messageCount,
+      );
+      if (
+        this.disposed ||
+        !sameChat(this.getContext(), chatId) ||
+        revision !== this.revision
+      )
+        return;
+      if (currentPrefix !== container.seed.chatPrefixFingerprint) {
+        container.status = 'needs-reseed';
         review(container, {
           kind: 'replay',
-          message: `Retained transaction invalid: ${String(error)}`,
-          transaction,
+          message: 'A message before the seed changed; reseed is required.',
         });
-        return state;
+        putContainer(ctx, container);
+        await ctx.saveMetadata();
+        this.onChange();
+        return;
       }
-    }, structuredClone(container.seed.baseState));
-    type ReplayResult = {
-      state: GameState;
-      history: StateTransaction[];
-      aborted: boolean;
-    };
-    const replayAt = async (
-      i: number,
-      state: GameState,
-      history: StateTransaction[],
-    ): Promise<ReplayResult> => {
-      if (i >= messages.length) return { state, history, aborted: false };
-      const fp = messages[i];
-      const applyAnchoredManual = (
-        currentState: GameState,
-        currentHistory: StateTransaction[],
-      ) =>
-        anchoredManual
-          .filter((t) => t.sourceFingerprint === fp.fingerprint)
-          .reduce(
-            (acc, manual) => {
-              try {
-                const replayed = {
-                  ...manual,
-                  sourceOrdinal: i,
-                  sourceSwipeId: fp.swipeId,
-                };
-                return {
-                  state: applyTransaction(acc.state, replayed.events),
-                  history: [...acc.history, replayed],
-                };
-              } catch (error) {
-                review(container, {
-                  kind: 'manual',
-                  message: `Manual transaction invalid at its anchor: ${String(error)}`,
-                  transaction: manual,
-                });
-                return acc;
-              }
-            },
-            { state: currentState, history: currentHistory },
-          );
-      if (!fp.isAssistant) {
-        const manualResult = applyAnchoredManual(state, history);
-        return replayAt(i + 1, manualResult.state, manualResult.history);
-      }
-      if (
-        !sameChat(this.getContext(), chatId) ||
-        this.getContext().chat[i] === undefined
-      )
-        return { state, history, aborted: true };
-      const automaticResult = await (async (): Promise<ReplayResult> => {
+      const old = container.messages;
+      const start = this.firstChanged(
+        old,
+        messages,
+        container.seed.messageCount,
+        container.transactions,
+      );
+      if (start === -1) return;
+      container.status = 'replaying';
+      const anchoredManual = container.transactions.filter(
+        (t) => t.origin === 'manual',
+      );
+      const seedAnchor = this.seedAnchor(container);
+      const retained = container.transactions.filter(
+        (t) =>
+          t.sourceFingerprint === seedAnchor ||
+          (t.sourceOrdinal !== undefined && t.sourceOrdinal < start),
+      );
+      const retainedState = retained.reduce((state, transaction) => {
         try {
-          container.status = 'extracting';
-          const priorUserMessage = [...ctx.chat.slice(0, i)]
-            .reverse()
-            .find((x) => x.is_user);
-          const result = await extract(ctx, state, {
-            user: priorUserMessage?.mes,
-            userSpeaker: priorUserMessage?.name,
-            assistant: String(ctx.chat[i].mes ?? ''),
-            assistantSpeaker: ctx.chat[i].name,
-          });
-          const latest = sameChat(this.getContext(), chatId)
-            ? await fingerprintMessages(this.getContext().chat)
-            : [];
-          if (
-            !sameChat(this.getContext(), chatId) ||
-            revision !== this.revision ||
-            latest[i]?.fingerprint !== fp.fingerprint
-          )
-            return { state, history, aborted: true };
-          const nextState = validateExtraction(state, result);
-          container.reviewQueue = container.reviewQueue.filter(
-            (item) =>
-              !(
-                item.sourceFingerprint === fp.fingerprint &&
-                (item.kind === 'extraction' || item.kind === 'semantic')
-              ),
-          );
-          return {
-            state: nextState,
-            history: [
-              ...history,
-              automaticTransaction(result, fp.fingerprint, i, fp.swipeId),
-            ],
-            aborted: false,
-          };
+          return applyTransaction(state, transaction.events);
         } catch (error) {
           review(container, {
-            kind: 'extraction',
-            message: String(error),
-            raw: error instanceof ExtractionError ? error.raw : undefined,
-            sourceFingerprint: fp.fingerprint,
+            kind: 'replay',
+            message: `Retained transaction invalid: ${String(error)}`,
+            transaction,
           });
-          if (prefs.debug)
-            console.debug(
-              '[RP State Machine] extraction rejected',
-              fp.fingerprint,
-              error,
-            );
-          return { state, history, aborted: false };
+          return state;
         }
-      })();
-      if (automaticResult.aborted) return automaticResult;
-      const manualResult = applyAnchoredManual(
-        automaticResult.state,
-        automaticResult.history,
-      );
-      return replayAt(i + 1, manualResult.state, manualResult.history);
-    };
-    const replayed = await replayAt(start, retainedState, [...retained]);
-    // Manual transactions without a surviving anchor remain auditable but cannot be reapplied.
-    for (const manual of anchoredManual.filter(
-      (t) =>
-        t.sourceFingerprint !== seedAnchor &&
-        (!t.sourceFingerprint ||
-          !messages.some((m) => m.fingerprint === t.sourceFingerprint)),
-    ))
-      review(container, {
-        kind: 'manual',
-        message: 'Manual transaction anchor no longer exists.',
-        transaction: manual,
-      });
-    if (
-      replayed.aborted ||
-      !sameChat(this.getContext(), chatId) ||
-      revision !== this.revision
-    )
-      return;
-    container.currentState = replayed.state;
-    container.messages = messages;
-    container.transactions = replayed.history;
-    container.status = 'ready';
-    putContainer(this.getContext(), container);
-    await this.getContext().saveMetadata();
-    if (prefs.debug)
-      console.debug('[RP State Machine] reconcile committed', chatId);
-    this.onChange();
+      }, structuredClone(container.seed.baseState));
+      type ReplayResult = {
+        state: GameState;
+        history: StateTransaction[];
+        aborted: boolean;
+      };
+      const replayAt = async (
+        i: number,
+        state: GameState,
+        history: StateTransaction[],
+      ): Promise<ReplayResult> => {
+        if (i >= messages.length) return { state, history, aborted: false };
+        const fp = messages[i];
+        const applyAnchoredManual = (
+          currentState: GameState,
+          currentHistory: StateTransaction[],
+        ) =>
+          anchoredManual
+            .filter((t) => t.sourceFingerprint === fp.fingerprint)
+            .reduce(
+              (acc, manual) => {
+                try {
+                  const replayed = {
+                    ...manual,
+                    sourceOrdinal: i,
+                    sourceSwipeId: fp.swipeId,
+                  };
+                  return {
+                    state: applyTransaction(acc.state, replayed.events),
+                    history: [...acc.history, replayed],
+                  };
+                } catch (error) {
+                  review(container, {
+                    kind: 'manual',
+                    message: `Manual transaction invalid at its anchor: ${String(error)}`,
+                    transaction: manual,
+                  });
+                  return acc;
+                }
+              },
+              { state: currentState, history: currentHistory },
+            );
+        if (!fp.isAssistant) {
+          const manualResult = applyAnchoredManual(state, history);
+          return replayAt(i + 1, manualResult.state, manualResult.history);
+        }
+        if (
+          !sameChat(this.getContext(), chatId) ||
+          this.getContext().chat[i] === undefined
+        )
+          return { state, history, aborted: true };
+        const automaticResult = await (async (): Promise<ReplayResult> => {
+          try {
+            container.status = 'extracting';
+            const priorUserMessage = [...ctx.chat.slice(0, i)]
+              .reverse()
+              .find((x) => x.is_user);
+            const result = await extract(
+              agent,
+              state,
+              {
+                user: priorUserMessage?.mes,
+                userSpeaker: priorUserMessage?.name,
+                assistant: String(ctx.chat[i].mes ?? ''),
+                assistantSpeaker: ctx.chat[i].name,
+              },
+              { maxTokens, signal: abortController.signal },
+            );
+            const latest = sameChat(this.getContext(), chatId)
+              ? await fingerprintMessages(this.getContext().chat)
+              : [];
+            if (
+              !sameChat(this.getContext(), chatId) ||
+              revision !== this.revision ||
+              latest[i]?.fingerprint !== fp.fingerprint
+            )
+              return { state, history, aborted: true };
+            const nextState = validateExtraction(state, result);
+            container.reviewQueue = container.reviewQueue.filter(
+              (item) =>
+                !(
+                  item.sourceFingerprint === fp.fingerprint &&
+                  (item.kind === 'extraction' || item.kind === 'semantic')
+                ),
+            );
+            return {
+              state: nextState,
+              history: [
+                ...history,
+                automaticTransaction(result, fp.fingerprint, i, fp.swipeId),
+              ],
+              aborted: false,
+            };
+          } catch (error) {
+            if (abortController.signal.aborted)
+              return { state, history, aborted: true };
+            review(container, {
+              kind: 'extraction',
+              message: String(error),
+              raw: error instanceof ExtractionError ? error.raw : undefined,
+              sourceFingerprint: fp.fingerprint,
+            });
+            if (prefs.debug)
+              console.debug(
+                '[RP State Machine] extraction rejected',
+                fp.fingerprint,
+                error,
+              );
+            return { state, history, aborted: false };
+          }
+        })();
+        if (automaticResult.aborted) return automaticResult;
+        const manualResult = applyAnchoredManual(
+          automaticResult.state,
+          automaticResult.history,
+        );
+        return replayAt(i + 1, manualResult.state, manualResult.history);
+      };
+      const replayed = await replayAt(start, retainedState, [...retained]);
+      // Manual transactions without a surviving anchor remain auditable but cannot be reapplied.
+      for (const manual of anchoredManual.filter(
+        (t) =>
+          t.sourceFingerprint !== seedAnchor &&
+          (!t.sourceFingerprint ||
+            !messages.some((m) => m.fingerprint === t.sourceFingerprint)),
+      ))
+        review(container, {
+          kind: 'manual',
+          message: 'Manual transaction anchor no longer exists.',
+          transaction: manual,
+        });
+      if (
+        replayed.aborted ||
+        !sameChat(this.getContext(), chatId) ||
+        revision !== this.revision
+      )
+        return;
+      container.currentState = replayed.state;
+      container.messages = messages;
+      container.transactions = replayed.history;
+      container.status = 'ready';
+      putContainer(this.getContext(), container);
+      await this.getContext().saveMetadata();
+      if (prefs.debug)
+        console.debug('[RP State Machine] reconcile committed', chatId);
+      this.onChange();
+    } finally {
+      if (this.abortController === abortController)
+        this.abortController = undefined;
+    }
   }
   private firstChanged(
     old: RpStateContainer['messages'],

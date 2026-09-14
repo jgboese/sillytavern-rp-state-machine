@@ -47,6 +47,11 @@ export function preferences(context: {
     {}) as Partial<Preferences>;
   return { ...DEFAULT_PREFERENCES, ...settings };
 }
+export function normalizeStateAgentMaxTokens(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value))
+    return DEFAULT_PREFERENCES.stateAgentMaxTokens;
+  return Math.min(4096, Math.max(128, Math.trunc(value)));
+}
 export function setPreferences(
   context: { extensionSettings: Record<string, unknown> },
   next: Preferences,

@@ -114,6 +114,7 @@
   font-weight: 600;
 }
 .rpstate-drawer input,
+.rpstate-drawer select,
 .rpstate-drawer textarea {
   width: 100%;
   box-sizing: border-box;
@@ -144,6 +145,7 @@
   align-items: center;
 }
 .rpstate-drawer input:focus-visible,
+.rpstate-drawer select:focus-visible,
 .rpstate-drawer textarea:focus-visible,
 .rpstate-drawer button:focus-visible {
   outline: 3px solid var(--rpstate-accent);

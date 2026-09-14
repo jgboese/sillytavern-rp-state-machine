@@ -5,9 +5,12 @@ import {
 } from './schema';
 import type { GameState, StateTransaction } from './types';
 import { applyTransaction } from './reducer';
-export interface RawGenerator {
-  generateRaw(options: Record<string, unknown>): Promise<unknown>;
-}
+import {
+  StateAgentConfigurationError,
+  StateAgentTransportError,
+  type StateAgent,
+  type StateAgentRequest,
+} from './state-agent';
 export class ExtractionError extends Error {
   constructor(
     message: string,
@@ -21,24 +24,6 @@ const safeRaw = (value: unknown) =>
     0,
     4000,
   );
-type Attempt =
-  | { ok: true; value: Extraction; raw: unknown }
-  | { ok: false; error: unknown; raw: unknown };
-async function attempt(
-  generator: RawGenerator,
-  options: Record<string, unknown>,
-): Promise<Attempt> {
-  try {
-    const raw = await generator.generateRaw(options);
-    try {
-      return { ok: true, value: parseExtraction(raw), raw };
-    } catch (error) {
-      return { ok: false, error, raw };
-    }
-  } catch (error) {
-    return { ok: false, error, raw: undefined };
-  }
-}
 const allowed =
   'time.advance, time.set, location.set, currency.adjust, inventory.add, inventory.remove, condition.add, condition.remove, relationship.adjust, relationship.note';
 export function extractionPrompt(
@@ -89,7 +74,7 @@ export function parseExtraction(value: unknown): Extraction {
   return result.data;
 }
 export async function extract(
-  generator: RawGenerator,
+  agent: StateAgent,
   state: GameState,
   turn: {
     user?: string;
@@ -97,25 +82,60 @@ export async function extract(
     assistant: string;
     assistantSpeaker?: string;
   },
+  options: { maxTokens: number; signal?: AbortSignal },
 ): Promise<Extraction> {
   const prompt = extractionPrompt(state, turn);
-  const first = await attempt(generator, {
+  const firstRequest: StateAgentRequest = {
     prompt,
     systemPrompt: 'You are a precise RP state extractor.',
     jsonSchema: EXTRACTION_JSON_SCHEMA,
-    responseLength: 512,
-  });
-  if (first.ok) return first.value;
-  const second = await attempt(generator, {
+    maxTokens: options.maxTokens,
+    signal: options.signal,
+  };
+  let firstRaw: unknown;
+  let receivedFirstResponse = false;
+  try {
+    firstRaw = await agent.generate(firstRequest);
+    receivedFirstResponse = true;
+    return parseExtraction(firstRaw);
+  } catch (error) {
+    if (
+      error instanceof StateAgentConfigurationError ||
+      error instanceof StateAgentTransportError ||
+      options.signal?.aborted ||
+      (error instanceof DOMException && error.name === 'AbortError')
+    )
+      throw error;
+    // A rejected request is a provider failure; only a received malformed
+    // response gets a JSON-only retry.
+    if (!receivedFirstResponse) throw error;
+  }
+  const fallbackRequest: StateAgentRequest = {
     prompt: `${prompt}\nJSON ONLY. No markdown or prose.`,
     systemPrompt: 'Return exactly one JSON object.',
-    responseLength: 512,
-  });
-  if (second.ok) return second.value;
-  throw new ExtractionError(
-    `Structured extraction failed: ${String(first.error)}; fallback failed: ${String(second.error)}`,
-    `${safeRaw(first.raw)}\n--- fallback ---\n${safeRaw(second.raw)}`,
-  );
+    maxTokens: options.maxTokens,
+    signal: options.signal,
+  };
+  let fallbackRaw: unknown;
+  let receivedFallbackResponse = false;
+  try {
+    fallbackRaw = await agent.generate(fallbackRequest);
+    receivedFallbackResponse = true;
+    return parseExtraction(fallbackRaw);
+  } catch (error) {
+    if (
+      error instanceof StateAgentConfigurationError ||
+      error instanceof StateAgentTransportError ||
+      options.signal?.aborted ||
+      (error instanceof DOMException && error.name === 'AbortError')
+    )
+      throw error;
+    if (!receivedFallbackResponse) throw error;
+    throw new ExtractionError(
+      `Structured extraction failed; fallback failed: ${String(error)}`,
+      `${safeRaw(firstRaw)}\n--- fallback ---\n${safeRaw(fallbackRaw)}`,
+    );
+  }
 }
 export function automaticTransaction(
   extraction: Extraction,

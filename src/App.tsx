@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { GameState, RpStateContainer, StateEvent } from './types';
+import type { ConnectionProfile } from './state-agent';
 import { emptyState, getContainer, preferences } from './persistence';
 import { gameStateSchema, manualEventsSchema } from './schema';
 import type { RpStateMachine, TavernContext } from './runtime';
@@ -793,6 +794,35 @@ function Settings({
   prefs: ReturnType<typeof preferences>;
   refresh: () => void;
 }) {
+  const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
+  const refreshProfiles = useCallback(() => {
+    try {
+      setProfiles(
+        context.ConnectionManagerRequestService?.getSupportedProfiles() ?? [],
+      );
+    } catch {
+      setProfiles([]);
+    }
+  }, [context]);
+  useEffect(() => {
+    refreshProfiles();
+    const subscriptions: Array<() => void> = [];
+    for (const key of [
+      'CONNECTION_PROFILE_CREATED',
+      'CONNECTION_PROFILE_UPDATED',
+      'CONNECTION_PROFILE_DELETED',
+    ]) {
+      const type = context.eventTypes[key];
+      if (!type) continue;
+      context.eventSource.on(type, refreshProfiles);
+      subscriptions.push(() => {
+        if (context.eventSource.off)
+          context.eventSource.off(type, refreshProfiles);
+        else context.eventSource.removeListener?.(type, refreshProfiles);
+      });
+    }
+    return () => subscriptions.forEach((unsubscribe) => unsubscribe());
+  }, [context, refreshProfiles]);
   const update = (patch: Partial<typeof prefs>) => {
     context.extensionSettings.rp_state_machine = { ...prefs, ...patch };
     context.saveSettingsDebounced?.();
@@ -860,6 +890,48 @@ function Settings({
           />
           Debug logging
         </label>
+      </Card>
+      <Card title="State extraction model">
+        <label>
+          Connection profile
+          <select
+            value={prefs.stateAgentProfileId ?? ''}
+            onChange={(event) =>
+              update({ stateAgentProfileId: event.target.value || null })
+            }
+          >
+            <option value="">Current active connection (legacy)</option>
+            {prefs.stateAgentProfileId &&
+              !profiles.some((x) => x.id === prefs.stateAgentProfileId) && (
+                <option value={prefs.stateAgentProfileId} disabled>
+                  Previously selected profile — unavailable
+                </option>
+              )}
+            {profiles.map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {profile.name}
+                {profile.model ? ` — ${profile.model}` : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Maximum output tokens
+          <input
+            type="number"
+            min="128"
+            max="4096"
+            step="1"
+            value={prefs.stateAgentMaxTokens}
+            onChange={(event) =>
+              update({ stateAgentMaxTokens: Number(event.target.value) })
+            }
+          />
+        </label>
+        <p className="rpstate-muted">
+          Choose a fast, literal profile with reasoning disabled. Narration
+          continues using SillyTavern's active connection.
+        </p>
       </Card>
       <Card title="Import & export">
         <Actions>
