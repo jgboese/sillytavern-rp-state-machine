@@ -1,3 +1,5 @@
+# WIP. It's pretty clunky right now, doesn't always work. don't use.
+
 # RP State Machine
 
 A self-contained SillyTavern 1.18.0 UI extension that maintains an auditable,
